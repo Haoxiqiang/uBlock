@@ -24,7 +24,7 @@ jobs:
           tools/pull-assets.sh
       - name: Get release information
         run: |
-          echo VERSION=${GITHUB_REF/refs\/tags\//} >> $GITHUB_OUTPUT
+          echo ::set-output name=VERSION::${GITHUB_REF/refs\/tags\//}
       - name: Create GitHub release
         id: create_release
         uses: softprops/action-gh-release@v2
