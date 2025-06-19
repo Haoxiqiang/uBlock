@@ -1,0 +1,86 @@
+name: Sync from fork
+on:
+  schedule:
+    # * is a special character in YAML so you have to quote this string
+    - cron: "0 * * * *"
+  workflow_dispatch:
+
+jobs:
+  check-for-changes:
+    runs-on: ubuntu-latest
+    env:
+      FILES_TO_CHECK: "assets/assets.json|src/web_accessible_resources/|src/js/resources/|src/js/redirect-resources.js"
+      UPSTREAM_URL: "https://github.com/gorhill/ublock.git"
+    outputs:
+      changes: ${{ steps.git-check.outputs.changes-present }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - name: Fetch release version
+        run: |
+          git remote add upstream ${UPSTREAM_URL}
+          git fetch upstream && git diff --name-only --diff-filter AM HEAD..remotes/upstream/master > updatedfiles.txt
+      - name: Check for modified files
+        id: git-check
+        run: echo changes-present=$(if grep -qE "${FILES_TO_CHECK}" updatedfiles.txt; then echo 'true'; else echo 'false'; fi) >> $GITHUB_OUTPUT
+      - name: Show files
+        run: cat updatedfiles.txt
+      - name: Have files changed
+        if: steps.check-for-changes.outputs.changes-present == 'false'
+        run: echo "No changes needed to be synchronised"
+  sync:
+    if: ${{ needs.check-for-changes.outputs.changes == 'true' }}
+    env:
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    needs: check-for-changes
+    runs-on: ubuntu-latest
+    steps:
+      - name: Create mirror branch
+        run: |
+          git clone "https://github.com/gorhill/${GITHUB_REPOSITORY#$GITHUB_REPOSITORY_OWNER/}"
+          cd ${GITHUB_REPOSITORY#$GITHUB_REPOSITORY_OWNER/}
+          git checkout -b mirror
+          git remote add github "https://$GITHUB_ACTOR:$GITHUB_TOKEN@github.com/$GITHUB_REPOSITORY.git"
+          git push -u github mirror
+  create-pr:
+    env:
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    needs: sync
+    runs-on: ubuntu-latest
+    steps:
+      - name: Create PR
+        run: |
+          gh pr create --title "Fork Sync: Update from parent repository" --body "This PR was automatically created by a GitHub Action triggered by a cron schedule. Please review the changes and merge if appropriate." --base master --head mirror --repo ${GITHUB_REPOSITORY} || true
+  update-pr:
+    needs: create-pr
+    runs-on: ubuntu-latest
+    env:
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - name: Set PR Number to env
+        run: echo "PR_NUMBER=`gh pr list | grep 'Fork Sync' | awk {'print $1'}`" >> $GITHUB_ENV
+      - name: Run puLL-Merge
+        uses: brave/pull-merge@main
+        with:
+          owner: ${{ github.repository_owner }}
+          repo: ${{ github.event.repository.name }}
+          prnum: ${{ env.PR_NUMBER }}
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          include_diff: true
+          filterdiff_args: --include=**/assets/assets.json --include=**/src/web_accessible_resources/* --include=**/src/js/resources/* --include=**/src/js/redirect-resources.js
+  on-failure:
+    runs-on: ubuntu-latest
+    if: ${{ always() && (needs.sync.result == 'failure' || needs.create-pr.result == 'failure' || needs.update-pr.result == 'failure') }}
+    needs:
+      - sync
+      - create-pr
+      - update-pr
+    steps:
+      - uses: 8398a7/action-slack@28ba43ae48961b90635b50953d216767a6bea486 # v3.16.2
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+        with:
+          author_name: "Github Actions"
+          status: failure
+          fields: repo,message,commit,author,eventName,ref,workflow,pullRequest
